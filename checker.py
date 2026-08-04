@@ -99,11 +99,13 @@ def dead_site_count() -> int:
 # ── Site lists (random / low / mid) ─────────────────────────────────────────
 
 def _load_sites(path: str) -> list[str]:
-    try:
-        with open(path, "r", encoding="utf-8-sig") as f:
-            return [ln.strip() for ln in f if ln.strip()]
-    except FileNotFoundError:
-        return []
+    for enc in ("utf-8-sig", "utf-16", "latin-1"):
+        try:
+            with open(path, "r", encoding=enc) as f:
+                return [ln.strip() for ln in f if ln.strip()]
+        except (UnicodeDecodeError, FileNotFoundError):
+            continue
+    return []
 
 _sites: dict[str, list[str]] = {
     tier: _load_sites(path) for tier, path in _SITE_PATHS.items()
