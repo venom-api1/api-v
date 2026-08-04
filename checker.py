@@ -100,7 +100,7 @@ def dead_site_count() -> int:
 
 def _load_sites(path: str) -> list[str]:
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8-sig") as f:
             return [ln.strip() for ln in f if ln.strip()]
     except FileNotFoundError:
         return []
