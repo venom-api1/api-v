@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import threading
 import time
+import logging
 import warnings
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -28,11 +30,10 @@ try:
 except ImportError:
     psutil = None
     MEMORY_CHECK_ENABLED = False
-    print("[WARN] psutil not installed. Memory guard disabled.")
 
 MEMORY_LIMIT_PERCENT = 90
 
-PORT = int(os.environ.get("CHECKER_PORT", os.environ.get("PORT", "6767")))
+PORT = int(os.environ.get("CHECKER_PORT", os.environ.get("PORT", "6667")))
 stats_lock = asyncio.Lock()
 
 _stats = {
@@ -45,6 +46,52 @@ _stats = {
     "by":       "3ltz",
     "started":  time.strftime("%Y-%m-%d %H:%M:%S"),
 }
+
+# ── Live status display ───────────────────────────────────────────────────────
+# ── Redirect all logging to stderr so it never breaks the live display ────────
+logging.basicConfig(stream=sys.stderr, level=logging.ERROR,
+                    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+_live_lock  = threading.Lock()
+_live_ready = False
+_live_card  = ""
+_live_status= ""
+_live_resp  = ""
+
+_DISPLAY = (
+    "\033[2K\r⚡ Charge: {charged}  ✅ Approved: {approved}  "
+    "❌ Declined: {declined}  ⚠️  Error: {errors}  │  Active: {active}\n"
+    "\033[2K\rCard    : {card}\n"
+    "\033[2K\rStatus  : {status}\n"
+    "\033[2K\rResponse: {resp}"
+)
+
+def _render_live() -> None:
+    global _live_ready
+    block = _DISPLAY.format(
+        charged  = _stats["charged"],
+        approved = _stats["approved"],
+        declined = _stats["declined"],
+        errors   = _stats["errors"],
+        active   = _stats["active"],
+        card     = _live_card   or "—",
+        status   = _live_status or "—",
+        resp     = _live_resp   or "—",
+    )
+    with _live_lock:
+        if _live_ready:
+            sys.stdout.write("\033[4A")   # ارجع 4 أسطر
+        sys.stdout.write(block)
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        _live_ready = True
+
+def _update_live(card: str = "", status: str = "", response: str = "") -> None:
+    global _live_card, _live_status, _live_resp
+    if card:     _live_card   = card
+    if status:   _live_status = status
+    if response: _live_resp   = response
+
 
 def is_memory_exceeded() -> bool:
     if not MEMORY_CHECK_ENABLED or psutil is None:
@@ -62,11 +109,13 @@ def _save_dump(card: str, site: str, status: str, result: str, amount: str):
             line = f"[{timestamp}] {status.upper()} | {card} | {site} | {result} | ${amount}\n"
             f.write(line)
             f.flush()
-    except Exception as e:
-        print(f"[ERROR] كتابة dump.txt فشلت: {e}")
+    except Exception:
+        pass
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    # طباعة الحالة الأولى عند بدء الخادم
+    _render_live()
     yield
 
 app = FastAPI(title="3ltz", docs_url=None, redoc_url=None, lifespan=_lifespan)
@@ -128,8 +177,14 @@ async def check(
         _stats[{"charged":"charged","approved":"approved","declined":"declined"}.get(status,"errors")] += 1
         _stats["active"] -= 1
 
-    if status in ("charged", "approved"):
+    if status in ("charged", "approved", "declined"):
         _save_dump(cc, site, status, result.get("result", ""), result.get("amount", "0"))
+        _update_live(
+            card=cc,
+            status={"charged":"Charged","approved":"Approved","declined":"Declined"}.get(status, status),
+            response=result.get("result", ""),
+        )
+        _render_live()
 
     bot_status = {"charged":"Charged","approved":"Approved","declined":"Declined"}.get(status,"SiteError")
 
@@ -144,14 +199,6 @@ async def check(
     })
 
 if __name__ == "__main__":
-    print("━" * 50)
-    print("  3ltz Checker API (NO WORKERS, UNLIMITED CONCURRENCY)")
-    print(f"  Port    : {PORT}")
-    print(f"  Check   : /3ltz-xK9qPm2r")
-    print(f"  Status  : /3ltz-status")
-    print(f"  Memory limit: {MEMORY_LIMIT_PERCENT}% (returns 'Server is busy')")
-    print("━" * 50)
-
     uvicorn.run(
         "checker_api2:app",
         host="0.0.0.0",
