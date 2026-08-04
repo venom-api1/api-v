@@ -857,7 +857,6 @@ async def run_checkout_for_card_async(shop_url: str, card_entry: str,
         return result
 
     email       = generate_random_email()
-    # 🔥 استخدم فقط البروفايلات المدعومة
     impersonate = random.choice(["chrome124", "chrome120", "chrome116", "edge101", "safari15_5"])
     user_agent  = random.choice(USER_AGENTS)
 
