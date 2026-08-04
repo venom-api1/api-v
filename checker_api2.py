@@ -43,7 +43,7 @@ _stats = {
     "approved": 0,
     "declined": 0,
     "errors":   0,
-    "by":       "3ltz",
+    "by":       "VeNoM",
     "started":  time.strftime("%Y-%m-%d %H:%M:%S"),
 }
 
@@ -118,13 +118,13 @@ async def _lifespan(app: FastAPI):
     _render_live()
     yield
 
-app = FastAPI(title="3ltz", docs_url=None, redoc_url=None, lifespan=_lifespan)
+app = FastAPI(title="VeNoM", docs_url=None, redoc_url=None, lifespan=_lifespan)
 
-@app.get("/3ltz-status")
+@app.get("/VeNoM-status")
 async def status():
-    return JSONResponse({"ok": True, "api": "3ltz", **_stats})
+    return JSONResponse({"ok": True, "api": "VeNoM", **_stats})
 
-@app.api_route("/3ltz-xK9qPm2r", methods=["GET", "POST"])
+@app.api_route("/VeNoM-xK9qPm2r", methods=["GET", "POST"])
 async def check(
     request: Request,
     cc:    Optional[str] = Query(None),
@@ -164,7 +164,7 @@ async def check(
             "Status":   "SiteError",
             "Response": str(e)[:150],
             "Price":    "-",
-            "Gateway":  "3ltz",
+            "Gateway":  "VeNoM",
             "Card":     cc,
             "site":     site,
             "elapsed":  round(asyncio.get_event_loop().time() - t0, 2),
@@ -192,7 +192,7 @@ async def check(
         "Status":   bot_status,
         "Response": result.get("result", ""),
         "Price":    result.get("amount", "-"),
-        "Gateway":  "3ltz",
+        "Gateway":  "VeNoM",
         "Card":     cc,
         "site":     site,
         "elapsed":  elapsed,
