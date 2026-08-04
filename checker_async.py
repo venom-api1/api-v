@@ -16,7 +16,13 @@ async def check_card_async(cc: str, site: str, proxy: str) -> dict:
         pass
 
     try:
+        # قبل ما نعمل await، لازم نستدعي الدالة ونمسك النتيجة
         res = await auto_async.run_checkout_for_card_async(site, cc, proxy_url)
+        
+        # فحص مهم جداً: لو الدالة رجعت None بدلاً من نتيجة، نرمي خطأ واضح
+        if res is None:
+            raise Exception("Internal error: run_checkout_for_card_async returned None")
+
     except Exception as e:
         err_msg = str(e).replace("\n", " ")[:150]
         checker._mark_dead(site, err_msg)
