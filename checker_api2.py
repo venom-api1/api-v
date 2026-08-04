@@ -21,7 +21,6 @@ from fastapi import FastAPI, Request, Query
 from fastapi.responses import JSONResponse
 
 import checker_async
-import checker
 
 try:
     import psutil
@@ -29,11 +28,12 @@ try:
 except ImportError:
     psutil = None
     MEMORY_CHECK_ENABLED = False
+    print("[WARN] psutil not installed. Memory guard disabled.")
 
 MEMORY_LIMIT_PERCENT = 90
-REQUEST_TIMEOUT = 90
 
 PORT = int(os.environ.get("CHECKER_PORT", os.environ.get("PORT", "6767")))
+stats_lock = asyncio.Lock()
 
 _stats = {
     "active":   0,
@@ -42,49 +42,40 @@ _stats = {
     "approved": 0,
     "declined": 0,
     "errors":   0,
-    "by":       "VeNoM",
+    "by":       "3ltz",
     "started":  time.strftime("%Y-%m-%d %H:%M:%S"),
 }
-
-_mem_cache: dict = {"val": False, "ts": 0.0}
 
 def is_memory_exceeded() -> bool:
     if not MEMORY_CHECK_ENABLED or psutil is None:
         return False
-    now = time.time()
-    if now - _mem_cache["ts"] < 5.0:
-        return _mem_cache["val"]
     try:
-        val = psutil.virtual_memory().percent >= MEMORY_LIMIT_PERCENT
+        mem = psutil.virtual_memory()
+        return mem.percent >= MEMORY_LIMIT_PERCENT
     except Exception:
-        val = False
-    _mem_cache["val"] = val
-    _mem_cache["ts"]  = now
-    return val
+        return False
 
-async def _save_dump(card: str, site: str, status: str, result: str, amount: str):
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    line = f"[{timestamp}] {status.upper()} | {card} | {site} | {result} | ${amount}\n"
-    def _write():
-        try:
-            with open("dump.txt", "a", encoding="utf-8") as f:
-                f.write(line)
-                f.flush()
-        except Exception:
-            pass
-    await asyncio.to_thread(_write)
+def _save_dump(card: str, site: str, status: str, result: str, amount: str):
+    try:
+        with open("dump.txt", "a", encoding="utf-8") as f:
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            line = f"[{timestamp}] {status.upper()} | {card} | {site} | {result} | ${amount}\n"
+            f.write(line)
+            f.flush()
+    except Exception as e:
+        print(f"[ERROR] كتابة dump.txt فشلت: {e}")
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     yield
 
-app = FastAPI(title="VeNoM", docs_url=None, redoc_url=None, lifespan=_lifespan)
+app = FastAPI(title="3ltz", docs_url=None, redoc_url=None, lifespan=_lifespan)
 
-@app.get("/VeNoM-status")
+@app.get("/3ltz-status")
 async def status():
-    return JSONResponse({"ok": True, "api": "VeNoM", **_stats})
+    return JSONResponse({"ok": True, "api": "3ltz", **_stats})
 
-@app.api_route("/VeNoM-xK9qPm2r", methods=["GET", "POST"])
+@app.api_route("/3ltz-xK9qPm2r", methods=["GET", "POST"])
 async def check(
     request: Request,
     cc:    Optional[str] = Query(None),
@@ -105,71 +96,48 @@ async def check(
 
     if not cc:
         return JSONResponse({"error": "Missing cc"}, status_code=400)
-
-    # لو الموقع مش مبعوت، السيرفر هياخد واحد من ملف site.txt لوحده
     if not site:
-        try:
-            checker.reload_sites()  # يقرا الملف من جديد
-            site = checker.get_random_site("random")
-        except Exception:
-            site = None
-            
-        if not site:
-            return JSONResponse({"error": "No sites available in site.txt, or file is empty/broken. Please send site in request."}, status_code=400)
+        return JSONResponse({"error": "Missing site"}, status_code=400)
 
-    _stats["active"] += 1
-    _stats["total"]  += 1
+    async with stats_lock:
+        _stats["active"] += 1
+        _stats["total"]  += 1
 
-    t0 = time.monotonic()
+    t0 = asyncio.get_event_loop().time()
 
     try:
-        result = await asyncio.wait_for(
-            checker_async.check_card_async(cc, site, proxy or ""),
-            timeout=REQUEST_TIMEOUT,
-        )
-    except asyncio.TimeoutError:
-        _stats["errors"] += 1
-        _stats["active"] -= 1
-        return JSONResponse({
-            "Status":   "SiteError",
-            "Response": "Timeout",
-            "Price":    "-",
-            "Gateway":  "VeNoM",
-            "Card":     cc,
-            "site":     site,
-            "elapsed":  round(time.monotonic() - t0, 2),
-        })
+        result = await checker_async.check_card_async(cc, site, proxy or "")
     except Exception as e:
-        _stats["errors"] += 1
-        _stats["active"] -= 1
+        async with stats_lock:
+            _stats["errors"] += 1
+            _stats["active"] -= 1
         return JSONResponse({
             "Status":   "SiteError",
             "Response": str(e)[:150],
             "Price":    "-",
-            "Gateway":  "VeNoM",
+            "Gateway":  "3ltz",
             "Card":     cc,
             "site":     site,
-            "elapsed":  round(time.monotonic() - t0, 2),
+            "elapsed":  round(asyncio.get_event_loop().time() - t0, 2),
         })
 
-    elapsed     = round(time.monotonic() - t0, 2)
-    card_status = result.get("status", "error")
+    elapsed = round(asyncio.get_event_loop().time() - t0, 2)
+    status  = result.get("status", "error")
 
-    _stats[{"charged": "charged", "approved": "approved",
-            "declined": "declined"}.get(card_status, "errors")] += 1
-    _stats["active"] -= 1
+    async with stats_lock:
+        _stats[{"charged":"charged","approved":"approved","declined":"declined"}.get(status,"errors")] += 1
+        _stats["active"] -= 1
 
-    if card_status in ("charged", "approved"):
-        await _save_dump(cc, site, card_status, result.get("result", ""), result.get("amount", "0"))
+    if status in ("charged", "approved"):
+        _save_dump(cc, site, status, result.get("result", ""), result.get("amount", "0"))
 
-    bot_status = {"charged": "Charged", "approved": "Approved",
-                  "declined": "Declined"}.get(card_status, "SiteError")
+    bot_status = {"charged":"Charged","approved":"Approved","declined":"Declined"}.get(status,"SiteError")
 
     return JSONResponse({
         "Status":   bot_status,
         "Response": result.get("result", ""),
         "Price":    result.get("amount", "-"),
-        "Gateway":  "VeNoM",
+        "Gateway":  "3ltz",
         "Card":     cc,
         "site":     site,
         "elapsed":  elapsed,
@@ -177,12 +145,11 @@ async def check(
 
 if __name__ == "__main__":
     print("━" * 50)
-    print("  VeNoM Checker API — TURBO MODE")
-    print(f"  Port      : {PORT}")
-    print(f"  Endpoint  : /VeNoM-xK9qPm2r")
-    print(f"  Status    : /VeNoM-status")
-    print(f"  Timeout   : {REQUEST_TIMEOUT}s per check")
-    print(f"  Mem limit : {MEMORY_LIMIT_PERCENT}%")
+    print("  3ltz Checker API (NO WORKERS, UNLIMITED CONCURRENCY)")
+    print(f"  Port    : {PORT}")
+    print(f"  Check   : /3ltz-xK9qPm2r")
+    print(f"  Status  : /3ltz-status")
+    print(f"  Memory limit: {MEMORY_LIMIT_PERCENT}% (returns 'Server is busy')")
     print("━" * 50)
 
     uvicorn.run(
@@ -192,5 +159,5 @@ if __name__ == "__main__":
         loop="uvloop",
         access_log=False,
         backlog=4096,
-        timeout_keep_alive=55,
+        timeout_keep_alive=55
     )
