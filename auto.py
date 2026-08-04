@@ -24,7 +24,7 @@ SITE_TXT = Path(__file__).parent / "site.txt"
 WORKING_SITES_API = "https://apok-production.up.railway.app/sites/working"
 MAX_SITE_AMOUNT = 15.0
 
-BROWSER_PROFILES = ["chrome124", "chrome120", "chrome116", "edge101", "safari15_5"]
+BROWSER_PROFILES = ["chrome124", "chrome120", "chrome116", "edge101", "safari15_5", "firefox133"]
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
