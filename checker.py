@@ -35,7 +35,6 @@ _PROXY_SIGNS = ("407", "CONNECT tunnel", "libcurl", "Proxy Authentication", "cur
 
 _SITE_TTL = {
     "returned 429": 600,
-    "returned 503": 180,  # overloaded/protected — short cooldown
     "returned 403": 1800,
     "returned 402": 300,
     "returned 422": 300,
@@ -99,13 +98,11 @@ def dead_site_count() -> int:
 # ── Site lists (random / low / mid) ─────────────────────────────────────────
 
 def _load_sites(path: str) -> list[str]:
-    for enc in ("utf-8-sig", "utf-16", "latin-1"):
-        try:
-            with open(path, "r", encoding=enc) as f:
-                return [ln.strip() for ln in f if ln.strip()]
-        except (UnicodeDecodeError, FileNotFoundError):
-            continue
-    return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return [ln.strip() for ln in f if ln.strip()]
+    except FileNotFoundError:
+        return []
 
 _sites: dict[str, list[str]] = {
     tier: _load_sites(path) for tier, path in _SITE_PATHS.items()
@@ -299,4 +296,3 @@ def check_card(cc: str, site: str, proxy: str) -> dict:
         "receipt_url": res.receipt_url or "",
         "card":        cc,
     }
-
