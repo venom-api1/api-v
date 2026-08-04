@@ -21,6 +21,7 @@ from fastapi import FastAPI, Request, Query
 from fastapi.responses import JSONResponse
 
 import checker_async
+import checker
 
 try:
     import psutil
@@ -30,12 +31,10 @@ except ImportError:
     MEMORY_CHECK_ENABLED = False
 
 MEMORY_LIMIT_PERCENT = 90
-# حد أقصى لكل طلب فحص بطاقة (ثانية)
 REQUEST_TIMEOUT = 90
 
 PORT = int(os.environ.get("CHECKER_PORT", os.environ.get("PORT", "6767")))
 
-# ── Stats (no lock needed — int ops are GIL-safe enough for counters) ──
 _stats = {
     "active":   0,
     "total":    0,
@@ -47,7 +46,6 @@ _stats = {
     "started":  time.strftime("%Y-%m-%d %H:%M:%S"),
 }
 
-# ── Memory guard — cached لـ 5 ثواني لتجنب استدعاء psutil مع كل request ──
 _mem_cache: dict = {"val": False, "ts": 0.0}
 
 def is_memory_exceeded() -> bool:
@@ -64,8 +62,6 @@ def is_memory_exceeded() -> bool:
     _mem_cache["ts"]  = now
     return val
 
-
-# ── Async dump — لا يوقف event loop ──
 async def _save_dump(card: str, site: str, status: str, result: str, amount: str):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{timestamp}] {status.upper()} | {card} | {site} | {result} | ${amount}\n"
@@ -77,7 +73,6 @@ async def _save_dump(card: str, site: str, status: str, result: str, amount: str
         except Exception:
             pass
     await asyncio.to_thread(_write)
-
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
@@ -110,8 +105,17 @@ async def check(
 
     if not cc:
         return JSONResponse({"error": "Missing cc"}, status_code=400)
+
+    # لو الموقع مش مبعوت، السيرفر هياخد واحد من ملف site.txt لوحده
     if not site:
-        return JSONResponse({"error": "Missing site"}, status_code=400)
+        try:
+            checker.reload_sites()  # يقرا الملف من جديد
+            site = checker.get_random_site("random")
+        except Exception:
+            site = None
+            
+        if not site:
+            return JSONResponse({"error": "No sites available in site.txt, or file is empty/broken. Please send site in request."}, status_code=400)
 
     _stats["active"] += 1
     _stats["total"]  += 1
