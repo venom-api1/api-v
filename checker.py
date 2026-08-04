@@ -34,14 +34,17 @@ _dead_lock  = _threading.Lock()
 _PROXY_SIGNS = ("407", "CONNECT tunnel", "libcurl", "Proxy Authentication", "curl: (56)", "curl: (7)")
 
 _SITE_TTL = {
-    "returned 429": 600,
-    "returned 403": 1800,
-    "returned 402": 300,
-    "returned 422": 300,
-    "returned 404": 86400,
+    "returned 429":              1800,  # 30 دقيقة
+    "returned 403":              3600,  # ساعة
+    "returned 402":              300,
+    "returned 422":              300,
+    "returned 404":              86400,
+    "returned 1003":             7200,
+    "returned 1003 cloudflare":  7200,
+    "non-json (possible cf":     3600,
     "could not extract session": 300,
-    "curl: (28)": 90,    # connection timeout — short cooldown, may recover
-    "Step 0 failed": 90, # any step-0 error marks the site briefly dead
+    "curl: (28)":                90,
+    "Step 0 failed":             90,
 }
 
 # ── Alive-site cache (per tier) ───────────────────────────────────────────────
@@ -82,7 +85,7 @@ def _mark_dead(site_url: str, error_str: str) -> None:
     if not error_str or any(s in error_str for s in _PROXY_SIGNS):
         return
     for pattern, ttl in _SITE_TTL.items():
-        if pattern in error_str:
+        if pattern in error_str.lower():
             with _dead_lock:
                 _dead_sites[site_url] = _time.time() + ttl
             for t in _SITE_PATHS:
